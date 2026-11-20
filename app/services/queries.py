@@ -12,6 +12,7 @@ from app.models import (
     Patient,
     PatientIdentifier,
     ReportLink,
+    ResearchObservationIndex,
     ResourceVersion,
 )
 
@@ -139,3 +140,17 @@ def report_observation_ids(session: Session, report_id: str) -> list[str]:
         .scalars()
         .all()
     )
+
+
+def research_index_for_patient(session: Session, patient_id: str) -> list[dict]:
+    """Usable observations for a patient: id and current version only."""
+    _patient_or_404(session, patient_id)
+    rows = session.execute(
+        select(ResearchObservationIndex)
+        .where(ResearchObservationIndex.patient_id == patient_id)
+        .order_by(ResearchObservationIndex.updated_at, ResearchObservationIndex.observation_id)
+    ).scalars().all()
+    return [
+        {"observationId": row.observation_id, "version": row.version}
+        for row in rows
+    ]

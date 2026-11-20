@@ -24,6 +24,15 @@ services:
       DATABASE_URL: postgresql+psycopg2://research:research@db:5432/researchdb
     ports:
       - "8000:8000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\"",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
 volumes:
   pgdata:

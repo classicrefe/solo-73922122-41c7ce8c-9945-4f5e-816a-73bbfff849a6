@@ -15,6 +15,8 @@ docker compose up --build
 - OpenAPI：<http://localhost:8000/openapi.json>
 - 健康检查：<http://localhost:8000/health>
 - PostgreSQL：`localhost:5432`，库 `researchdb`，用户/密码 `research/research`
+- 研究索引查询：<http://localhost:8000/docs> 中的
+  `GET /patients/{patient_id}/research-index`（按患者返回可用观测 id + 版本）
 
 首次启动时 API 容器会等待数据库就绪并自动建表（`app/db_init.py`）。
 
@@ -114,6 +116,7 @@ Content-Type: application/json
 | GET | `/patients?identifier=system|value` | 按标识查患者 |
 | GET | `/patients/{id}` | 患者摘要（含报告/观测计数） |
 | GET | `/patients/{id}/observations` | 该患者全部观测 |
+| GET | `/patients/{id}/research-index` | **研究索引**：可用观测的 id + 当前版本（仅此两项） |
 | GET | `/patients/{id}/diagnostic-reports` | 该患者全部报告（含观测 id 列表） |
 | GET | `/observations/{id}` | 单个观测（响应头带 `ETag: W/"v"`） |
 | GET | `/diagnostic-reports/{id}` | 单个报告 |
@@ -121,7 +124,47 @@ Content-Type: application/json
 | GET | `/diagnostic-reports/{id}/_history` | 报告全部历史版本 |
 | GET | `/patients/{id}/_history` | 患者历史版本 |
 
-## 4. 业务规则与失败语义
+## 4. 研究观测索引（research observation index）
+
+分析作业不需要扫描 FHIR 正文：`research_observation_index` 表为每位患者保存
+**可直接用于研究**的观测 id 与当前版本。入库规则：
+
+- 观测自身 `status == "final"`；
+- 且至少一份 `status` 为 `final` 或 `amended` 的报告通过 `result` 引用它。
+
+同一观测被多份合格报告引用时只保留**一行**（主键为 `observation_id`）。当最后
+一份合格引用被撤下（报告更正 result 列表）或报告/观测失去资格（状态改为
+`preliminary` / `cancelled` / `corrected` 等）时，索引行随之删除。
+
+**一致性保证**
+
+1. 索引维护与源数据写入在**同一个数据库事务**内完成：`POST /fhir` 成功则两者
+   一起提交，任何校验/版本/引用失败都会一起回滚。
+2. 启动时（`app/db_init.py`）对已入库数据执行**幂等回填**：补缺失行、删过期行、
+   刷新版本；可重复执行，兼容旧数据卷。也可单独运行 `python -m app.backfill_index`。
+3. 两个更正包并发撤下同一观测的不同报告引用时，索引决策前按观测 id（排序后）
+   获取 PostgreSQL 事务级 advisory lock，使决策读取到先提交事务的撤下结果，
+   由最后提交者按剩余合格引用决定保留/删除，避免 READ COMMITTED 下的写偏斜。
+
+查询示例（对应 Swagger 的 `GET /patients/{patient_id}/research-index`）：
+
+```bash
+curl -s "http://localhost:8000/patients/<患者id>/research-index" | python3 -m json.tool
+```
+
+```json
+{
+  "resourceType": "Bundle",
+  "type": "searchset",
+  "patientId": "<患者id>",
+  "total": 1,
+  "entry": [
+    {"observationId": "<观测id>", "version": 2}
+  ]
+}
+```
+
+## 5. 业务规则与失败语义
 
 1. **条目上限 20**，仅允许 `Patient / Observation / DiagnosticReport`；
    超限或类型不符 → `400`。
@@ -141,7 +184,7 @@ Content-Type: application/json
    - 幂等状态持久化在 PostgreSQL，进程重启/响应丢失后重试仍然安全。
 7. 所有错误均返回 FHIR `OperationOutcome`（`application/fhir+json`）。
 
-## 5. 本地开发与自测（无需 Docker）
+## 6. 本地开发与自测（无需 Docker）
 
 ```bash
 pip install -r requirements.txt
@@ -152,9 +195,11 @@ pytest -q
 ```
 
 测试默认连接 `postgresql+psycopg2://research@localhost:5433/researchdb_test?host=/tmp`，
-可用 `DATABASE_URL` 覆盖；并发测试（同标识建患、If-Match 竞争）仅在 PostgreSQL 下执行。
+可用 `DATABASE_URL` 覆盖；并发测试（同标识建患、If-Match 竞争、索引并发撤下）仅在
+PostgreSQL 下执行。`python -m app.db_init` 会建表并对已有数据回填研究索引；
+也可单独运行 `python -m app.backfill_index` 重建索引。
 
-## 6. 目录结构
+## 7. 目录结构
 
 ```
 app/
@@ -168,7 +213,8 @@ app/
   services/
     bundle.py        Bundle 校验、幂等、事务处理、患者一致性规则
     queries.py       读取与历史查询
-scripts/entrypoint.sh  容器启动（等库+建表）
-tests/               25 个 pytest 用例（含并发、重启、原子性）
+    research_index.py  研究索引维护、启动回填、并发串行化
+scripts/entrypoint.sh  容器启动（等库+建表+索引回填）
+tests/               57 个 pytest 用例（含并发、重启、原子性、索引）
 docker-compose.yml   db + api 两服务，含健康检查
 ```

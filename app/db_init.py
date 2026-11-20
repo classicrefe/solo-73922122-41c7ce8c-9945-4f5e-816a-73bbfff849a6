@@ -1,11 +1,15 @@
-"""Create database tables. Runs on container start and for local setup."""
+"""Create database tables and backfill the research observation index.
+
+Runs on container start and for local setup. All steps are idempotent, so
+existing volumes are upgraded in place without losing data.
+"""
 from __future__ import annotations
 
 import time
 
 from sqlalchemy import text
 
-from app.database import engine, init_db
+from app.database import engine, init_db_and_backfill
 
 
 def wait_for_database(max_attempts: int = 30, delay: float = 1.0) -> None:
@@ -23,5 +27,5 @@ def wait_for_database(max_attempts: int = 30, delay: float = 1.0) -> None:
 
 if __name__ == "__main__":
     wait_for_database()
-    init_db()
-    print("database schema ready")
+    inspected = init_db_and_backfill()
+    print(f"database schema ready; research index backfilled ({inspected} observations)")

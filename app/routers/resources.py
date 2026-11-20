@@ -42,6 +42,25 @@ def get_patient_observations(
     }
 
 
+@router.get("/patients/{patient_id}/research-index")
+def get_patient_research_index(
+    patient_id: str, session: Session = Depends(get_session)
+):
+    """Research-usable observations (final + referenced by a final/amended report).
+
+    Returns only the Observation id and its current version so analysis jobs can
+    fetch exactly what they need without scanning FHIR bodies.
+    """
+    items = queries.research_index_for_patient(session, patient_id)
+    return {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "patientId": patient_id,
+        "total": len(items),
+        "entry": items,
+    }
+
+
 @router.get("/patients/{patient_id}/diagnostic-reports")
 def get_patient_reports(
     patient_id: str, session: Session = Depends(get_session)

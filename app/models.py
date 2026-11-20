@@ -128,6 +128,38 @@ class ReportLink(Base):
     report: Mapped[DiagnosticReport] = relationship(back_populates="links")
 
 
+class ResearchObservationIndex(Base):
+    """Lookup table for research/analysis jobs: usable Observation id + version.
+
+    A row exists for an Observation exactly when
+
+    * the Observation's FHIR ``status`` is ``final``, and
+    * at least one DiagnosticReport whose FHIR ``status`` is ``final`` or
+      ``amended`` links to it.
+
+    The row is derived data: it is maintained in the same database transaction
+    as the source resources, so it commits and rolls back with them. Multiple
+    qualifying reports still produce exactly one row.
+    """
+
+    __tablename__ = "research_observation_index"
+    __table_args__ = (
+        Index("ix_research_observation_index_patient", "patient_id"),
+    )
+
+    observation_id: Mapped[str] = mapped_column(
+        ForeignKey("observations.id", ondelete="CASCADE"), primary_key=True
+    )
+    patient_id: Mapped[str] = mapped_column(
+        ForeignKey("patients.id", ondelete="CASCADE"), nullable=False
+    )
+    # Current observations.version, so one lookup yields id + exact version.
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
 class ResourceVersion(Base):
     """Append-only version history for every stored resource."""
 

@@ -43,3 +43,17 @@ def init_db() -> None:
 
     assert models.Base is Base
     Base.metadata.create_all(bind=engine)
+
+
+def init_db_and_backfill() -> int:
+    """Create tables, then (re)build the derived research index.
+
+    Runs on every startup so databases populated before the index existed get
+    their rows, and stale rows left by an older mapping are removed. The
+    operation is idempotent and safe to repeat.
+    """
+    from app.services.research_index import backfill_research_index
+
+    init_db()
+    with SessionLocal() as session:
+        return backfill_research_index(session)

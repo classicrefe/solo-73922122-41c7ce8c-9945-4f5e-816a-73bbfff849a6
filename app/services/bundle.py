@@ -45,6 +45,7 @@ from app.models import (
     ReportLink,
     ResourceVersion,
 )
+from app.services.research_index import sync_research_index
 
 ALLOWED_TYPES = {"Patient", "Observation", "DiagnosticReport"}
 URN_UUID_RE = re.compile(r"^urn:uuid:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
@@ -385,7 +386,17 @@ def process_bundle(session: Session, bundle: dict, idempotency_key: str) -> dict
         _validate_patient_alignment(entries, obs_rows, report_rows, session)
 
         _apply_observations(session, observation_entries, obs_rows, patient_rows, entries)
-        _apply_reports(session, report_entries, report_rows, obs_rows, entries)
+        detached_obs_ids = _apply_reports(
+            session, report_entries, report_rows, obs_rows, entries
+        )
+
+        # Derived index maintenance happens in this same transaction: it is
+        # committed with the source rows and rolled back with them.
+        affected_obs_ids = {entry.row_id for entry in observation_entries}
+        for entry in report_entries:
+            affected_obs_ids.update(entry.result_obs_ids)
+        affected_obs_ids.update(detached_obs_ids)
+        sync_research_index(session, affected_obs_ids)
 
         receipt = _build_receipt(entries, idempotency_key)
         store_completed_response(session, idempotency_key, receipt)
@@ -793,7 +804,9 @@ def _apply_reports(
     report_rows: dict[str, DiagnosticReport],
     obs_rows: dict[str, Observation],
     all_entries: list[ParsedEntry],
-) -> None:
+) -> set[str]:
+    """Apply report writes; return observations whose links this bundle dropped."""
+    detached_obs_ids: set[str] = set()
     for entry in report_entries:
         report = report_rows[entry.row_id]
         target_version = 1 if entry.method == "POST" else report.version + 1
@@ -807,10 +820,14 @@ def _apply_reports(
             report.patient_id = entry.subject_pid  # type: ignore[assignment]
             report.version = target_version
             report.status = "updated"
-            # Replace the link set with the submitted result list.
+            # Replace the link set with the submitted result list. Remember
+            # observations that were referenced only by the old version so the
+            # index can be recomputed for them after the links are removed.
+            previous_obs_ids = {link.observation_id for link in report.links}
             for link in list(report.links):
                 session.delete(link)
             session.flush()
+            detached_obs_ids.update(previous_obs_ids - set(entry.result_obs_ids))
         else:
             report.version = 1
 
@@ -828,6 +845,7 @@ def _apply_reports(
             )
         )
         entry.version = target_version
+    return detached_obs_ids
 
 
 # --------------------------------------------------------------------------- #
